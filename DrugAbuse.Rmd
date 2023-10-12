@@ -1,0 +1,154 @@
+---
+title: "Drug Abuse"
+author: "Oscar Briones Ramirez"
+date: '2023-04-09'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("/Users/oscar/Desktop/Winter2023/STAT469/DrugAbuse")
+
+library(tidyverse)
+library(GGally)
+library(car)
+library(MASS)
+library(lmtest)
+library(multcomp)
+library(forecast)
+library(gstat)
+library(nlme)
+library(sf)
+library(spdep)
+
+source("moranBasis.R")
+```
+
+## Reading in and Handling Shapefiles
+
+**1. Read in the drug abuse shapefile.**
+```{r readshp, include=TRUE}
+myShp <- st_read("DrugAbuse.shp")
+```
+
+
+**2. Create a dataframe from the shapefile that exclude the polygon information.**
+```{r datafr, include=TRUE}
+myShpDF <- data.frame(myShp)%>%
+  dplyr::select(-geometry)
+```
+
+
+## Exploratory Data Analysis
+
+**1.Create a pairs plot (ggpairs()) to assess the relationship between log(Count) and the explanatory variables (note we are using log(Count) here as the response because Poisson regression is log-linear).**
+
+```{r ggpairs, include=TRUE}
+ggpairs(log(myShpDF[,-1]))
+```
+
+**2. Create a choropleth map of log(Count).**
+```{r chlor, include=TRUE}
+ggplot(data=myShp) +  geom_sf(mapping=aes(fill=log(Count)), color="black") +  scale_fill_distiller(palette="Spectral")
+```
+
+**3.Fit a lm() of log(Count) using Population, PctWhite, MedInc and Pct18to34 as explanatory variables. Perform a Moran’s I test on the residuals to see if there is spatial correlation in the residuals.**
+```{r lm, include=TRUE}
+drug.lm <- lm(formula=log(Count)~Population + PctWhite + MedInc + Pct18to34, data=myShpDF)
+
+moran.test(x=drug.lm$residuals, listw=nb2listw(poly2nb(myShp)))
+```
+**4. Perform a Geary’s C test on your residuals from #3 above to double check if there is spatial correlation in the residuals.**
+
+```{r geary, include=TRUE}
+geary.test(x=drug.lm$residuals, listw=nb2listw(poly2nb(myShp)))
+```
+**5. Map the residuals from the lm() fit to see if there is spatial correlation.**
+```{r map1, include=TRUE}
+ggplot(data=myShp) +
+  geom_sf(mapping=aes(fill=resid(drug.lm)))
+```
+
+## Defining Spatial Basis Functions
+
+**1. Create the adjacency matrix.**
+```{r adjmat, include=TRUE}
+A <- nb2mat(poly2nb(myShp), style="B")
+```
+
+**2. Create the Moran spatial basis and plot the first basis in a chloropleth map.**
+```{r moran1, include=TRUE}
+X <- model.matrix(object=log(Count)~Population + PctWhite + MedInc + Pct18to34, data=myShpDF)
+
+M <- moranBasis(X, A, tol=0.95)
+
+ggplot(data=myShp) +
+  geom_sf(mapping=aes(fill=M$B1))
+```
+
+**3. Merge the Moran spatial bases into your myShpDF data frame for use in fitting models later.  **
+
+```{r cbind, include=TRUE}
+myShpDF <- bind_cols(myShpDF, M)
+```
+
+
+## Spatial GLM Model Fitting
+
+**1. Fit a spatial GLM model with Count as the response and using PctWhite, MedInc, Population, Pct18to34 AND your spatial bases as explanatory variables. Print a summary() of the model to see your coefficient table.**
+
+```{r glm, include=TRUE}
+drug.glm <- glm(formula=Count~. - State, data=myShpDF, family=poisson)
+summary(drug.glm)
+```
+
+## Validating Spatial MLR Model Assumptions and Predictions
+
+**1.Check the assumption of linearity using added-variable plots.**
+
+```{r avplots, include=TRUE}
+avPlots(drug.glm, ask=FALSE)
+```
+
+**2. Check the assumption of independence by decorrelating residuals and performing Moran’s I or Geary’s C tests to make sure there is no more spatial correlation.**
+```{r I, echo = TRUE}
+source("stdres.gls.R")
+sres <- stdres.gls(drug.glm)
+
+moran.test(x=sres, listw=nb2listw(poly2nb(myShp)))
+```
+**3.Draw a choropleth map of the standardized and decorrelated residuals to visually verify that the residuals are no longer spatially correlated.**
+
+```{r clordecor, echo = TRUE}
+ggplot(data=myShp) +
+   geom_sf(mapping=aes(fill=sres), color="black") +  scale_fill_distiller(palette="RdBu")
+```
+
+**4. Check the assumption of equal variance by plotting the standardized and decorrelated residuals vs. the log(fitted values).**
+
+```{r eqvar, echo = TRUE}
+ggplot(mapping=aes(y=log(fitted(drug.glm)), x=sres)) + geom_point()
+```
+
+## Statistical Inference
+
+**1. Print out the summary of the GLM model fit and identify the estimates and 95% confidence intervals of your explanatory variables. **
+```{r summ, echo = TRUE}
+summary(drug.glm)
+
+confint(drug.glm,level=.95)
+```
+
+**2. Create a chloropleth map of the spatially correlated residuals (just the b′iθ̂ part) to identify states that, after accounting for the explanatory variables, have an elevated level of risk.**
+
+```{r chlorcor, echo = TRUE}
+
+spatial <- as.matrix(coef(drug.glm)[-(1:5)])
+
+M <- as.matrix(M)
+
+
+ggplot(data=myShp) +
+   geom_sf(mapping=aes(fill=M %*% spatial), color="black") +  scale_fill_distiller(palette="RdBu")
+
+
+```
